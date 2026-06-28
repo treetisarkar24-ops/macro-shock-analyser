@@ -1,5 +1,11 @@
 # Macro Shock Analyser
 
+### 📊 [**View the live report →**](https://treetisarkar24-ops.github.io/macro-shock-analyser/report.html)
+
+_The full styled analysis, rendered as a web page._
+
+---
+
 **Does Deutsche Bank's macro beta change with the economic regime?**
 
 A small, defensible econometric study, built in R, of how Deutsche Bank's monthly
