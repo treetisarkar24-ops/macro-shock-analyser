@@ -12,6 +12,7 @@ output:
     code_folding: hide
     theme: flatly
     df_print: kable
+    css: report-style.css
 ---
 
 ```{r setup, include=FALSE}
