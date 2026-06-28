@@ -1,0 +1,21 @@
+# R
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# Generated figures (re-created by R/04_thesis_figures.R)
+output/*.png
+
+# Knitr / RMarkdown intermediates
+report_files/
+report_cache/
+*.knit.md
+*.utf8.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp

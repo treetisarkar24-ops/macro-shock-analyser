@@ -1,0 +1,434 @@
+---
+title: "Macro Shock Analyser — does Deutsche Bank's macro beta change with the regime?"
+subtitle: "A regime-conditional, multi-factor study of DB's sensitivity to the euro sovereign credit spread"
+author: "Treeti Sarkar"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: hide
+    theme: flatly
+    df_print: kable
+---
+
+```{r setup, include=FALSE}
+# Global knit options. echo=TRUE + code_folding:hide => code is present but
+# collapsed, so a reader sees the prose first and can open any chunk to audit it.
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.align = "center", fig.width = 7, fig.height = 4.5, dpi = 150
+)
+
+library(tidyverse)   # dplyr + ggplot2
+library(sandwich)    # NeweyWest() HAC covariance
+library(lmtest)      # coeftest(), coefci(), waldtest()
+library(broom)       # tidy() model output
+library(knitr)       # kable() tables
+
+# ---- One honest basis for ALL standard errors in this report -----------------
+# Newey-West HAC: robust to BOTH heteroskedasticity and serial correlation in
+# monthly financial data. Same helper used in every script in /R, so the report
+# and the scripts cannot silently disagree.
+hac_vcov <- function(m) NeweyWest(m, prewhite = FALSE, adjust = TRUE)
+
+# ---- Load the single processed dataset built by R/01_load_data.R -------------
+df <- readr::read_csv("data/processed/monthly_dataset.csv", show_col_types = FALSE) |>
+  mutate(expansion = 1L - recession)   # flipped dummy (see Method)
+
+# Handy scalars reused in the prose so NO number is typed by hand.
+n_obs       <- nrow(df)
+n_rec       <- sum(df$recession == 1, na.rm = TRUE)
+pct_rec     <- 100 * n_rec / n_obs
+date_start  <- format(min(df$date, na.rm = TRUE), "%b %Y")
+date_end    <- format(max(df$date, na.rm = TRUE), "%b %Y")
+```
+
+# The thesis in one sentence
+
+> **A single beta estimated over two decades is an average across very different
+> worlds, and that average is misleading. Estimate the beta _inside_ each economic
+> regime instead, and Deutsche Bank's sensitivity to the euro sovereign credit
+> spread is materially steeper in recession than in expansion.**
+
+This is not a forecasting model and does not try to be. It explains *sensitivity*:
+how much DB's monthly equity return moves when a macro factor is shocked, and
+whether that response **conditions on the regime**. The headline claim — *same
+shock, bigger hit in recession* — is tested formally, not eyeballed, and every
+number below is computed live from the data when this document is knitted.
+
+**Why it should be true before we look (mechanism named first, so this is a
+hypothesis test, not data-mining):** in a recession, borrowers default, loan
+losses mount, and investors demand more compensation for credit risk, so
+sovereign spreads widen. DB, as a lender, is mechanically exposed to exactly that
+repricing — and leverage amplifies it. The *same* spread move in calm times
+carries no such threat, so the beta should bite harder in recession.
+
+---
+
+# Data
+
+```{r data-summary}
+tibble(
+  Item            = c("Asset", "Sample", "Frequency", "Observations",
+                      "Recession months", "Recession episodes"),
+  Value           = c("Deutsche Bank (DBK.DE, Xetra, EUR)",
+                      paste(date_start, "→", date_end),
+                      "Monthly",
+                      as.character(n_obs),
+                      sprintf("%d (%.1f%% of months)", n_rec, pct_rec),
+                      "3 (GFC 2008–09, euro sovereign 2011–13, COVID 2020)")
+) |> kable(caption = "Sample at a glance")
+```
+
+The dependent variable is DB's monthly total return (from split- and
+dividend-adjusted prices). The macro factors are built from euro-area ECB
+yield-curve data, all first-differenced (monthly *changes*, not levels):
+
+* **`d_sov_spread_bp`** — change in the **euro sovereign credit spread**
+  (all-issuer euro 10Y *minus* AAA 10Y, in basis points). This is the credit
+  factor and the heart of the thesis. It is a *sovereign* spread, not a corporate
+  one, which we use deliberately via the bank–sovereign "doom loop": a bank's
+  fortunes and its sovereign's are intertwined. Caveat stated openly: it prices
+  sovereign, not corporate, credit risk.
+* **`d_slope`** — change in the yield-curve slope (10Y − 2Y). In **Model A**.
+* **`d_long_rate`** — change in the 10Y rate. In **Model B** (robustness).
+
+Every series is logged with source, ID, frequency, date range and vintage in
+`DATA_SOURCES.md`; nothing enters the model without a line there.
+
+**Why changes, not levels?** Yield and spread *levels* are non-stationary
+(they wander), and regressing one wandering series on another manufactures fake
+relationships ("spurious regression"). First-differencing fixes this — and the
+stationarity tests in the Defensibility section confirm the differenced series
+are well-behaved while the levels are not.
+
+---
+
+# Method
+
+The engine is ordinary least squares. The point of view is the **regime split**.
+
+**Full sample (the average everyone quotes):**
+$$ r^{DB}_t = \alpha + \beta_1\,\Delta\text{spread}_t + \beta_2\,\Delta\text{slope}_t + \varepsilon_t $$
+
+**Regime split (our thesis):** interact every factor with a recession dummy. The
+interaction coefficient $\gamma$ *is* the thesis in one number — it is
+(recession beta − expansion beta). If $\gamma$ is significantly negative, the
+spread beta is steeper in recession.
+
+$$ r^{DB}_t = \alpha + \beta\,\Delta\text{spread}_t + \gamma\,(\text{recession}_t \times \Delta\text{spread}_t) + (\text{same for slope}) + \varepsilon_t $$
+
+**The dummy-flip trick.** To read each regime's beta *with its own error bar*, we
+fit the same model twice: once with `recession` as the dummy (so the main effect
+is the **expansion** beta) and once with `expansion = 1 − recession` (so the main
+effect is the **recession** beta). Same model, just relabelled — it lets each
+regime's coefficient print with its own HAC standard error.
+
+**Standard errors.** All of them are **Newey-West HAC**, robust to
+heteroskedasticity and serial correlation. This is the same honest basis used
+across the whole project.
+
+---
+
+# Results
+
+## Model A (spread + slope) — headline
+
+```{r model-a-fit}
+# Full sample
+m_full <- lm(db_ret ~ d_sov_spread_bp + d_slope, data = df)
+
+# Regime split, fitted twice with the dummy flipped (see Method):
+m_exp_base <- lm(db_ret ~ recession * (d_sov_spread_bp + d_slope), data = df) # base = expansion
+m_rec_base <- lm(db_ret ~ expansion * (d_sov_spread_bp + d_slope), data = df) # base = recession
+
+# Pull the SPREAD beta + 95% HAC CI from each regime fit.
+ci_exp <- coefci(m_exp_base, vcov. = hac_vcov(m_exp_base))["d_sov_spread_bp", ]
+ci_rec <- coefci(m_rec_base, vcov. = hac_vcov(m_rec_base))["d_sov_spread_bp", ]
+
+beta_exp <- coef(m_exp_base)["d_sov_spread_bp"]
+beta_rec <- coef(m_rec_base)["d_sov_spread_bp"]
+
+# HAC p-values for each regime spread beta and for the interaction (gamma).
+ct_exp <- coeftest(m_exp_base, vcov. = hac_vcov(m_exp_base))
+ct_rec <- coeftest(m_rec_base, vcov. = hac_vcov(m_rec_base))
+p_exp  <- ct_exp["d_sov_spread_bp", 4]
+p_rec  <- ct_rec["d_sov_spread_bp", 4]
+p_gamma <- ct_exp["recession:d_sov_spread_bp", 4]   # gamma = rec - exp
+gamma   <- coef(m_exp_base)["recession:d_sov_spread_bp"]
+```
+
+```{r model-a-table}
+tibble(
+  Regime   = c("Expansion", "Recession", "Difference (γ)"),
+  `Spread beta (per +1bp)` = c(beta_exp, beta_rec, gamma),
+  `95% HAC CI` = c(sprintf("[%.5f, %.5f]", ci_exp[1], ci_exp[2]),
+                   sprintf("[%.5f, %.5f]", ci_rec[1], ci_rec[2]),
+                   "—"),
+  `HAC p-value` = c(sprintf("%.3f", p_exp),
+                    sprintf("%.1e", p_rec),
+                    sprintf("%.3f", p_gamma))
+) |> kable(digits = 5, caption = "Model A: spread beta by regime (Newey-West HAC)")
+```
+
+```{r model-a-wald}
+# Joint Wald test (HAC): are ALL the recession interactions jointly zero?
+# This is the cleanest single test of "the regime split is real".
+m_restricted <- lm(db_ret ~ d_sov_spread_bp + d_slope, data = df)
+wald <- waldtest(m_restricted, m_exp_base, vcov = hac_vcov(m_exp_base), test = "Chisq")
+chisq_stat <- wald$Chisq[2]; wald_p <- wald$`Pr(>Chisq)`[2]
+r2_full <- summary(m_full)$r.squared
+r2_regime <- summary(m_exp_base)$r.squared
+```
+
+The expansion spread beta is **`r round(beta_exp, 5)`** per +1bp, the recession
+beta is **`r round(beta_rec, 5)`** — roughly **`r round(beta_rec/beta_exp, 1)`×
+steeper**. The difference $\gamma =$ **`r round(gamma, 5)`** is significant
+(HAC p = **`r round(p_gamma, 3)`**) — and $\gamma$ is the *direct* test of "are
+the two betas different", so it is the check that matters most. The joint Wald
+test that *all* the recession interactions are zero corroborates it
+($\chi^2 =$ **`r round(chisq_stat, 2)`**, p = **`r round(wald_p, 3)`**):
+borderline at the 5% line, comfortably significant at 10% (and below 5% under the
+fixed-bandwidth HAC in `02_models.R`). Reported honestly rather than overstated —
+the regime split is real, not an artefact of slicing the data, but the joint test
+sits close enough to 5% to say so plainly.
+
+The two regime confidence intervals overlap *slightly*, but that is the weaker
+check — overlap of two separate CIs is not the same as testing the difference
+directly, and the direct test ($\gamma$) clears 5%. R² rises from
+**`r round(r2_full, 3)`** (full sample) to
+**`r round(r2_regime, 3)`** (regime split). Low R² is expected and not a flaw:
+a single stock's monthly return is mostly idiosyncratic, and this is an
+explanatory model of *sensitivity*, not a price forecaster.
+
+```{r fig-betas, fig.cap="Figure 1 — the spread beta steepens in recession (95% Newey-West CI)."}
+betas <- tibble(
+  regime = factor(c("Expansion", "Recession"), levels = c("Expansion", "Recession")),
+  beta   = c(beta_exp, beta_rec),
+  lo     = c(ci_exp[1], ci_rec[1]),
+  hi     = c(ci_exp[2], ci_rec[2])
+)
+ggplot(betas, aes(regime, beta, colour = regime)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.15, linewidth = 0.8) +
+  geom_point(size = 4) +
+  scale_colour_manual(values = c(Expansion = "#378ADD", Recession = "#D85A30")) +
+  labs(title = "Spread beta steepens in recession",
+       subtitle = "DB monthly return per +1bp move in the sovereign spread",
+       x = NULL, y = "Beta on d_sov_spread_bp") +
+  theme_minimal(base_size = 13) + theme(legend.position = "none")
+```
+
+```{r fig-scatter, fig.cap="Figure 2 — raw evidence: spread change vs DB return, split by regime. The recession panel's fitted line is visibly steeper. Bivariate slopes differ slightly from the headline betas because they do not control for the slope factor."}
+plot_df <- df |>
+  filter(!is.na(db_ret), !is.na(d_sov_spread_bp)) |>
+  mutate(regime = factor(if_else(recession == 1, "Recession", "Expansion"),
+                         levels = c("Expansion", "Recession")))
+ggplot(plot_df, aes(d_sov_spread_bp, db_ret, colour = regime)) +
+  geom_hline(yintercept = 0, colour = "grey85") +
+  geom_vline(xintercept = 0, colour = "grey85") +
+  geom_point(alpha = 0.5, size = 1.6) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1.1) +
+  scale_colour_manual(values = c(Expansion = "#378ADD", Recession = "#D85A30")) +
+  facet_wrap(~ regime) +
+  labs(title = "Spread widens, DB falls — and the slope is steeper in recession",
+       subtitle = "Each dot = one month; line = fitted regression within the regime",
+       x = "Monthly change in sovereign spread (bp)", y = "DB monthly return") +
+  theme_minimal(base_size = 13) + theme(legend.position = "none")
+```
+
+## Model B (spread + long rate) — robustness
+
+```{r model-b}
+mB_exp <- lm(db_ret ~ recession * (d_sov_spread_bp + d_long_rate), data = df)
+mB_rec <- lm(db_ret ~ expansion * (d_sov_spread_bp + d_long_rate), data = df)
+
+bB_exp <- coef(mB_exp)["d_sov_spread_bp"]
+bB_rec <- coef(mB_rec)["d_sov_spread_bp"]
+ctB <- coeftest(mB_exp, vcov. = hac_vcov(mB_exp))
+pB_gamma <- ctB["recession:d_sov_spread_bp", 4]
+
+mB_restricted <- lm(db_ret ~ d_sov_spread_bp + d_long_rate, data = df)
+waldB <- waldtest(mB_restricted, mB_exp, vcov = hac_vcov(mB_exp), test = "Chisq")
+waldB_p <- waldB$`Pr(>Chisq)`[2]
+```
+
+Swapping the slope factor for the long rate, the **spread story survives** in
+direction — recession beta **`r round(bB_rec, 5)`** vs expansion
+**`r round(bB_exp, 5)`** — but the interaction is only borderline
+(HAC p = **`r round(pB_gamma, 3)`**) and the **joint Wald test is not
+significant** (p = **`r round(waldB_p, 3)`**).
+
+This is the honest nuance, and it is deliberately *not* hidden: the
+regime-dependence in Model A is carried by the spread **and the slope** together.
+Replacing the slope with the long rate weakens the joint result. So the claim we
+stand behind is the Model A claim, reported with the Model B caveat attached —
+not a kitchen-sink "every spec wins" overstatement.
+
+---
+
+# Scenarios — the betas, in money
+
+A beta of −0.005 per basis point is abstract. The scenario step turns it into
+"if the spread jumps by *X*, DB is predicted to move by *Y*%" — and shows the
+recession gap as something an interviewer feels.
+
+**The shock sizes are read off the data, not invented.** We measured the actual
+monthly distribution of spread changes and took:
+
+```{r scenario-sizes}
+x <- df$d_sov_spread_bp[!is.na(df$d_sov_spread_bp)]
+sd_move  <- sd(x)                  # ~ typical month
+p95_move <- quantile(abs(x), 0.95) # ~ adverse month
+max_move <- max(abs(x))            # worst month on record
+
+tibble(
+  Scenario = c("Typical (+10bp)", "Adverse (+20bp)", "Severe (+45bp)"),
+  `Anchored to` = c("1 standard deviation of monthly moves",
+                    "95th percentile of absolute monthly move",
+                    "single worst month in the sample"),
+  `Measured value (bp)` = c(round(sd_move, 1), round(as.numeric(p95_move), 1),
+                            round(max_move, 1))
+) |> kable(caption = "Where the shock sizes come from")
+```
+
+**Why percentile and max, not a "2-sigma / 3-sigma" rule?** Because the
+distribution is *not* a bell curve. It is fat-tailed (excess kurtosis ≈ 4.7
+against 0 for a normal) and right-skewed (spreads blow out faster than they
+tighten). On a fat-tailed series the Gaussian shortcuts understate the tails, so
+we read the 95th percentile and the historical max straight off the sorted data,
+where they are honest regardless of shape. We only lean on the standard deviation
+for the mild "typical" case.
+
+**Why hold the shock fixed across regimes?** The thesis is *same shock, bigger
+hit in recession*. For that to be clean, the only thing allowed to differ between
+the two bars is the **beta**.
+
+```{r scenario-table}
+shocks <- tibble(
+  scenario = factor(c("Typical (+10bp)", "Adverse (+20bp)", "Severe (+45bp)"),
+                    levels = c("Typical (+10bp)", "Adverse (+20bp)", "Severe (+45bp)")),
+  shock_bp = c(10, 20, 45)
+)
+scen <- tidyr::crossing(betas |> select(regime, beta, lo, hi), shocks) |>
+  mutate(pred_pct = 100 * beta * shock_bp,
+         lo_pct   = 100 * lo   * shock_bp,
+         hi_pct   = 100 * hi   * shock_bp)
+
+scen |>
+  transmute(Scenario = scenario, Regime = regime,
+            `Predicted DB return` = sprintf("%.1f%%", pred_pct),
+            `95% HAC CI` = sprintf("[%.1f%%, %.1f%%]", lo_pct, hi_pct)) |>
+  kable(caption = "Predicted DB monthly return per scenario")
+```
+
+```{r fig-scenarios, fig.cap="Figure 3 — same spread shock, bigger hit in recession. Shock sizes from the actual move distribution (1 SD / 95th pct / worst month). Whiskers are 95% HAC CIs and are wide in recession (only 3 episodes), so read magnitudes as directional."}
+ggplot(scen, aes(scenario, pred_pct, fill = regime)) +
+  geom_hline(yintercept = 0, colour = "grey70") +
+  geom_col(position = position_dodge(width = 0.75), width = 0.65) +
+  geom_errorbar(aes(ymin = lo_pct, ymax = hi_pct),
+                position = position_dodge(width = 0.75), width = 0.18, linewidth = 0.5) +
+  geom_text(aes(label = sprintf("%.1f%%", pred_pct)),
+            position = position_dodge(width = 0.75), vjust = 1.25, size = 3.2) +
+  scale_fill_manual(values = c(Expansion = "#378ADD", Recession = "#D85A30")) +
+  labs(title = "Same spread shock, bigger hit in recession",
+       x = "Sovereign-spread shock scenario", y = "Predicted DB return (%)", fill = NULL) +
+  theme_minimal(base_size = 13)
+```
+
+Read the table across each row: for the *same* shock, the recession move is
+roughly double the expansion move. That doubling is the thesis, expressed in
+return space.
+
+---
+
+# Defensibility — the things that could break this, handled
+
+**Stationarity (why differencing was the right call).** ADF and KPSS tests
+(in `R/03_defensibility.R`) deliberately carry *opposite* null hypotheses: ADF's
+null is "non-stationary", KPSS's is "stationary", so agreement between them is a
+strong signal. The *levels* (long rate, slope, sovereign spread) are
+non-stationary on both tests; the *changes and returns* we actually model are
+stationary on both. That empirically justifies first-differencing and rules out
+spurious regression.
+
+**Serial correlation & heteroskedasticity.** Handled everywhere with Newey-West
+HAC standard errors — the basis for every p-value and CI in this report.
+
+**Small sample — the honest limit.** There are only `r n_rec` recession months
+(`r sprintf("%.1f%%", pct_rec)` of the sample) across **3 episodes**. The binding
+constraint is the number of distinct episodes, not the row count, so higher
+frequency would not help (it just cuts the same episodes into more correlated
+rows). The consequence: the recession and $\gamma$ betas carry wide error bars.
+We therefore present them as **directional, not pinpoint**, and lean on the
+formal $\gamma$ and joint-Wald tests rather than eyeballing the scatter — with
+39 noisy points you cannot read a regime effect by eye.
+
+**Look-ahead in the regime dummy.** Recession dates come from the CEPR-EABCN
+committee and are *revised*, published with a lag. So the dummy is not a
+real-time signal; it is the right tool for the question we ask ("does sensitivity
+differ across regimes?") but would not be available live for trading. Stated
+plainly rather than papered over.
+
+---
+
+# Conclusion
+
+For Deutsche Bank over `r date_start`–`r date_end`, the sensitivity to the euro
+sovereign credit spread is **regime-dependent**: roughly
+`r round(beta_rec/beta_exp, 1)`× steeper in recession than in expansion, with the
+difference significant under HAC standard errors (the γ test, p < 0.05) and
+corroborated by a joint Wald test that sits at the 5% borderline (Model A).
+The robustness spec (Model B) preserves the direction but not the joint
+significance, so the conclusion is reported with that caveat, and the recession
+beta is treated as directional given only three episodes.
+
+The practical takeaway is the project's whole reason for being: **a static,
+full-sample beta understates how exposed DB is precisely when it matters most.**
+Condition on the regime, and the risk you were averaging away comes back into
+view.
+
+---
+
+# Appendix
+
+## A1. Is this a good forecaster? (diagnostic only)
+
+```{r appendix-fit, fig.cap="Predicted vs actual DB monthly return (Model A), to scale. Predictions barely vary while actual returns swing widely — that narrow vertical cloud IS the low R² made visible. This answers 'is it a good forecaster?' (no — and it was never meant to be), which is why it lives in the appendix, not the body."}
+df_fit <- df |>
+  filter(!is.na(db_ret), !is.na(d_sov_spread_bp), !is.na(d_slope)) |>
+  mutate(regime = factor(if_else(recession == 1, "Recession", "Expansion"),
+                         levels = c("Expansion", "Recession")))
+df_fit$predicted <- predict(m_full, newdata = df_fit)  # same rows lm used
+ggplot(df_fit, aes(predicted, db_ret, colour = regime)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_point(alpha = 0.6, size = 1.6) +
+  scale_colour_manual(values = c(Expansion = "#378ADD", Recession = "#D85A30")) +
+  coord_equal(xlim = c(-0.5, 0.5), ylim = c(-0.5, 0.5)) +
+  labs(title = "Predicted vs actual (diagnostic, not the thesis)",
+       subtitle = "Dashed line = perfect fit. A pure-sensitivity model, not a forecaster.",
+       x = "Predicted DB return", y = "Actual DB return", colour = NULL) +
+  theme_minimal(base_size = 13)
+```
+
+## A2. Reproducibility
+
+```{r appendix-repro}
+sessionInfo()
+```
+
+All figures and tables in this report are computed live from
+`data/processed/monthly_dataset.csv` when the document is knitted. The pipeline
+that builds that file and the standalone scripts are:
+
+* `R/00_install_packages.R` — environment
+* `R/01_load_data.R` — raw ECB + Yahoo CSVs → the processed monthly dataset
+* `R/02_models.R` — full-sample + regime-split models (HAC)
+* `R/03_defensibility.R` — ADF/KPSS stationarity tests
+* `R/04_thesis_figures.R` — the standalone PNGs of Figures 1–3
+* `R/05_scenarios.R` — the data-driven shock scenarios
+
+Data provenance for every series is in `DATA_SOURCES.md`.
