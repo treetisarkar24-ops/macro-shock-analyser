@@ -49,6 +49,13 @@ as downloaded.
 final month-to-date row is dropped at load so only complete months enter the
 model, and the series is trimmed to ≥ Sept 2004 to align with the ECB series.
 
+> **Note on the price data.** The Deutsche Bank price series is sourced from
+> Yahoo Finance and is included here solely to make the study reproducible — not
+> for commercial redistribution. The committed CSV is provided only so the
+> analysis runs out of the box; anyone reusing this repository can regenerate it
+> independently with `scripts/get_stock_data.py`. All rights to the underlying
+> market data remain with their respective owners.
+
 ---
 
 ## Considered and rejected
